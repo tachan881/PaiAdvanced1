@@ -1,0 +1,1 @@
+docker run -d --name pai_ros2 -p 6080:80 -p 9090:9090 -p 9876:9876 --shm-size=512m -v ".:/workspace" airobotbook/ros2-desktop-ai-robot-book-humble:latest

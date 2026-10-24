@@ -1,0 +1,6 @@
+cp "$(ros2 pkg prefix crane_plus_gazebo)/share/crane_plus_gazebo/worlds/table.sdf" /workspace/drill_table.sdf
+cd /workspace/ros2_ws
+source /opt/ros/humble/setup.bash
+source /workspace/ros2_ws/install/local_setup.bash
+
+ros2 launch crane_plus_gazebo crane_plus_with_table.launch.py world_name:=/workspace/drill_table.sdf
