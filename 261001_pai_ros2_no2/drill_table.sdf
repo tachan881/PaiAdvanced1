@@ -46,21 +46,22 @@
 
     <model name="workpiece">
       <static>true</static>
-      <pose>0.25 0 1.05 0 0 0</pose>
+      <pose>0.25 0 1.15 0 0 0</pose>
       <link name="body">
         <collision name="collision">
           <geometry>
-            <box><size>0.08 0.08 0.04</size></box>
+            <box><size>0.08 0.16 0.16 </size></box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>0.08 0.08 0.04</size></box>
+            <box><size>0.08 0.16 0.16</size></box>
           </geometry>
           <material>
             <ambient>0.7 0.3 0.2 1</ambient>
             <diffuse>0.7 0.3 0.2 1</diffuse>
           </material>
+          <transparency>0.6</transparency>
         </visual>
       </link>
     </model>

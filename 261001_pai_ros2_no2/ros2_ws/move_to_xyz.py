@@ -79,6 +79,21 @@ class XYZMover(Node):
             return False
         self.get_logger().info('IK解: ' + ', '.join(f'{v:.3f}' for v in q) + ' [rad]')
 
+        if not self.move_to_joints(q, plan_only, speed):
+            return False
+        if plan_only:
+            return True
+        # 実行直後はTFが更新されきっていないことがあるため少し待つ
+        for _ in range(10):
+            rclpy.spin_once(self, timeout_sec=0.1)
+        tip = self.tip_in_base()
+        err = np.linalg.norm(tip - np.asarray(xyz))
+        self.get_logger().info(
+            f'到達位置: ({tip[0]:.3f}, {tip[1]:.3f}, {tip[2]:.3f}) m  目標との差: {err * 1000:.1f} mm')
+        return True
+
+    def move_to_joints(self, q, plan_only=False, speed=0.3):
+        """関節角 q[4] を目標に、MoveItで衝突回避の計画と実行を行う。"""
         if not self._client.wait_for_server(timeout_sec=10.0):
             self.get_logger().error('/move_action が見つかりません。シミュレーションを起動してください')
             return False
@@ -116,17 +131,8 @@ class XYZMover(Node):
         if code != MoveItErrorCodes.SUCCESS:
             self.get_logger().error(f'MoveIt失敗: error_code={code}')
             return False
-
         if plan_only:
             self.get_logger().info('計画のみ成功（実行はしていません）')
-            return True
-        # 実行直後はTFが更新されきっていないことがあるため少し待つ
-        for _ in range(10):
-            rclpy.spin_once(self, timeout_sec=0.1)
-        tip = self.tip_in_base()
-        err = np.linalg.norm(tip - np.asarray(xyz))
-        self.get_logger().info(
-            f'到達位置: ({tip[0]:.3f}, {tip[1]:.3f}, {tip[2]:.3f}) m  目標との差: {err * 1000:.1f} mm')
         return True
 
 

@@ -56,6 +56,7 @@ def parse(source):
 
         words = [(m.group(1), float(m.group(2))) for m in _WORD.finditer(text)]
         target = {}
+        program_end = False
         for letter, value in words:
             if letter == 'N':
                 continue
@@ -77,6 +78,8 @@ def parse(source):
                 code = int(value)
                 if code in (3, 4, 5, 30, 2):
                     items.append(Event(f'M{code:02d}', lineno))
+                    if code == 30:
+                        program_end = True
                 else:
                     raise GCodeError(f'{lineno}行目: 未対応の M{code} です')
             elif letter == 'F':
@@ -91,6 +94,8 @@ def parse(source):
                 raise GCodeError(f'{lineno}行目: 未対応のアドレス {letter} です')
 
         if not target:
+            if program_end:
+                break
             continue
         if motion is None:
             raise GCodeError(f'{lineno}行目: 移動指令(G00/G01/G81)が指定されていません')
@@ -113,6 +118,8 @@ def parse(source):
             items.append(Move(new['X'], new['Y'], new['Z'], False, feed, lineno))
             items.append(Move(new['X'], new['Y'], r, True, 0.0, lineno))
             pos = {'X': new['X'], 'Y': new['Y'], 'Z': r}
+            if program_end:
+                break
             continue
 
         rapid = motion == 'G0'
@@ -120,5 +127,7 @@ def parse(source):
             raise GCodeError(f'{lineno}行目: G01 の前に F（送り速度）が必要です')
         items.append(Move(new['X'], new['Y'], new['Z'], rapid, feed, lineno))
         pos = new
+        if program_end:
+            break
 
     return items

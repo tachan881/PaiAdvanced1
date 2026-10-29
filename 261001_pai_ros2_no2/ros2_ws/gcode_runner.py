@@ -19,7 +19,11 @@ base_link座標のどこか[m]を指定する（既定はワーク上面の中�
 """
 import argparse
 import math
+import os
+import subprocess
 import sys
+import threading
+import time
 
 import numpy as np
 import rclpy
@@ -118,6 +122,104 @@ def execute(node, qs, times):
     return True
 
 
+def find_cuts(path, origin_m, box_center, box_size, seg_len):
+    """送り(G01)でワーク(箱)の中を進む区間を探し、掘り進む様子を表す円柱区間を返す。
+
+    戻り値: [(path番号, 区間の始点, 終点), ...]（base_link座標[m]）。
+    ドリルがseg_len進むごと（と、区間の終わり）に1つ作る。
+    """
+    lo = np.asarray(box_center) - np.asarray(box_size) / 2
+    hi = np.asarray(box_center) + np.asarray(box_size) / 2
+    pts = [origin_m + np.array(p[:3]) / 1000.0 for p in path]
+    inside = [bool(np.all(p >= lo) and np.all(p <= hi)) for p in pts]
+    cuts = []
+    i = 1
+    while i < len(pts):
+        if path[i][3] or not inside[i] or inside[i - 1]:
+            i += 1
+            continue
+        a, b = pts[i - 1], pts[i]
+        d = b - a
+        t_in = 0.0
+        for k in range(3):
+            if abs(d[k]) < 1e-9:
+                continue
+            t0, t1 = (lo[k] - a[k]) / d[k], (hi[k] - a[k]) / d[k]
+            t_in = max(t_in, min(t0, t1))
+        last = a + d * min(t_in, 1.0)
+        j = i
+        while j < len(pts) and inside[j] and not path[j][3]:
+            nxt_end = j + 1 >= len(pts) or not inside[j + 1] or path[j + 1][3]
+            if np.linalg.norm(pts[j] - last) >= seg_len or nxt_end:
+                if np.linalg.norm(pts[j] - last) > 1e-6:
+                    cuts.append((j, last, pts[j]))
+                    last = pts[j]
+            j += 1
+        i = j
+    return cuts
+
+
+# 実行ユーザーごとに別ファイルにする（/tmpのスティッキービットで他ユーザーのファイルは消せないため）
+MARKS_FILE = f'/tmp/gcode_marks_{os.getuid()}.txt'
+
+
+def _gz(service, reqtype, req):
+    cmd = ['ign', 'service', '-s', f'/world/default/{service}', '--reqtype', reqtype,
+           '--reptype', 'ignition.msgs.Boolean', '--timeout', '2000', '--req', req]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def clear_marks():
+    """前回の実行で作った穴のモデルを消す。"""
+    try:
+        with open(MARKS_FILE) as f:
+            names = f.read().split()
+    except FileNotFoundError:
+        return
+    for name in names:
+        _gz('remove', 'ignition.msgs.Entity', f'name: "{name}" type: MODEL')
+    try:
+        os.remove(MARKS_FILE)
+    except OSError:
+        open(MARKS_FILE, 'w').close()
+
+
+def spawn_cut(name, a_world, b_world, radius, color):
+    """a→bを結ぶ円柱（穴の一部）をGazeboに出す。"""
+    d = b_world - a_world
+    length = float(np.linalg.norm(d))
+    d = d / length
+    mid = (a_world + b_world) / 2
+    theta = math.acos(max(-1.0, min(1.0, d[2])))
+    psi = math.atan2(d[1], d[0])
+    r, g, b = color
+    mat = (f"<ambient>{r} {g} {b} 1</ambient><diffuse>{r} {g} {b} 1</diffuse>"
+           f"<emissive>{r} {g} {b} 1</emissive>")
+    sdf = (f"<sdf version='1.7'><model name='{name}'><static>true</static>"
+           f"<pose>{mid[0]} {mid[1]} {mid[2]} 0 {theta} {psi}</pose>"
+           f"<link name='l'><visual name='v'><geometry><cylinder><radius>{radius}</radius>"
+           f"<length>{length}</length></cylinder></geometry><material>{mat}</material></visual>"
+           f"</link></model></sdf>")
+    _gz('create', 'ignition.msgs.EntityFactory', f'sdf: "{sdf}"')
+    with open(MARKS_FILE, 'a') as f:
+        f.write(name + '\n')
+
+
+def start_marking(cuts, times, base_in_world, radius, color):
+    """実行開始に合わせて、ドリルが進んだ分だけ穴をGazeboに伸ばしていく。"""
+    t0 = time.time()
+    base = np.asarray(base_in_world)
+
+    def run():
+        for n, (j, a, b) in enumerate(cuts):
+            time.sleep(max(0.0, t0 + times[j] - time.time()))
+            spawn_cut(f'hole_{n}', a + base, b + base, radius, color)
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return th
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -133,6 +235,18 @@ def main():
     ap.add_argument('--feed-scale', type=float, default=1.0, help='G01の送り速度の倍率')
     ap.add_argument('--step', type=float, default=2.0, help='G01の分割間隔[mm]')
     ap.add_argument('--dry-run', action='store_true', help='IKと所要時間の確認のみ（動かさない）')
+    ap.add_argument('--no-return-home', action='store_true',
+                    help='完了後に初期位置へ戻らない（既定は戻る）')
+    ap.add_argument('--home-joints', type=float, nargs=4, default=[0.0, 0.0, 0.0, 0.0],
+                    metavar=('J1', 'J2', 'J3', 'J4'),
+                    help='戻る初期姿勢[rad]（既定: 全関節0 = シミュレーション起動直後の姿勢）')
+    ap.add_argument('--no-mark', action='store_true', help='加工位置のマーク表示をしない')
+    ap.add_argument('--work-box', type=float, nargs=6, default=[0.25, 0.0, 0.135, 0.08, 0.16, 0.16],
+                    metavar=('CX', 'CY', 'CZ', 'SX', 'SY', 'SZ'),
+                    help='ワークの中心とサイズ[m]（base_link座標。既定は現在のdrill_table.sdf）')
+    ap.add_argument('--base-in-world', type=float, nargs=3, default=[0.0, 0.0, 1.015],
+                    metavar=('X', 'Y', 'Z'), help='base_linkのワールド座標[m]')
+    ap.add_argument('--hole-radius', type=float, default=0.004, help='穴の半径[m]')
     args = ap.parse_args()
 
     with open(args.program, encoding='utf-8') as f:
@@ -181,12 +295,26 @@ def main():
         if not node.move_to(start_xyz, pitch):
             return 1
         node.get_logger().info('Gコードを実行します')
+        if not args.no_mark:
+            clear_marks()
+            cuts = find_cuts(path, origin, args.work_box[:3], args.work_box[3:], 0.003)
+            node.get_logger().info(f'穴の表示: {len(cuts)} 区間')
+            start_marking(cuts, times, args.base_in_world, args.hole_radius, (0.9, 0.1, 0.1))
         ok = execute(node, qs, times)
         if ok:
             tip_now = node.tip_in_base()
             last = origin + np.array(path[-1][:3]) / 1000.0
             node.get_logger().info(
                 f'完了。最終位置との差 {np.linalg.norm(tip_now - last) * 1000:.1f} mm')
+        if not args.no_return_home:
+            # 加工が途中で失敗した場合も、安全のため初期位置へ戻す
+            reason = 'M30（プログラム終了）' if any(e.text == 'M30' for e in events) else '終了'
+            node.get_logger().info(f'{reason}: 初期位置へ戻ります（MoveIt・衝突回避）')
+            if not node.move_to_joints(args.home_joints):
+                node.get_logger().error('初期位置への復帰に失敗しました')
+                ok = False
+            else:
+                node.get_logger().info('初期位置に戻りました')
     except (RuntimeError, gcode_parser.GCodeError) as e:
         node.get_logger().error(str(e))
     finally:
